@@ -1,7 +1,9 @@
+# cython: language_level=3str
+
 import datetime
 import decimal
 import numbers
-from collections import Iterable, Mapping
+from collections import Mapping, Sequence
 
 from . import const
 from ._six import long, is_str, iterkeys, itervalues
@@ -18,6 +20,9 @@ cdef int32 INT_MIN_VALUE = const.INT_MIN_VALUE
 cdef int32 INT_MAX_VALUE = const.INT_MAX_VALUE
 cdef long64 LONG_MIN_VALUE = const.LONG_MIN_VALUE
 cdef long64 LONG_MAX_VALUE = const.LONG_MAX_VALUE
+
+no_value = object()
+
 
 cdef inline bint validate_null(datum, schema=None,
                                str parent_ns='', bint raise_errors=True):
@@ -42,9 +47,9 @@ cdef inline bint validate_bytes(datum, schema=None,
 cdef inline bint validate_int(datum, schema=None,
                               str parent_ns='', bint raise_errors=True):
     return (
-        (isinstance(datum, (int, long, numbers.Integral)) and
-         INT_MIN_VALUE <= datum <= INT_MAX_VALUE) or
-        isinstance(datum, (
+        (isinstance(datum, (int, long, numbers.Integral))
+         and INT_MIN_VALUE <= datum <= INT_MAX_VALUE)
+        or isinstance(datum, (
             datetime.time, datetime.datetime, datetime.date))
     )
 
@@ -52,10 +57,9 @@ cdef inline bint validate_int(datum, schema=None,
 cdef inline bint validate_long(datum, schema=None,
                                str parent_ns='', bint raise_errors=True):
     return (
-        (isinstance(datum, (int, long, numbers.Integral)) and
-         LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE) or
-        isinstance(datum, (
-            datetime.time, datetime.datetime, datetime.date))
+        (isinstance(datum, (int, long, numbers.Integral))
+         and LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE)
+        or isinstance(datum, (datetime.time, datetime.datetime, datetime.date))
     )
 
 
@@ -66,9 +70,10 @@ cdef inline bint validate_float(datum, schema=None,
 
 cdef inline bint validate_fixed(datum, dict schema,
                                 str parent_ns='', bint raise_errors=True):
-    return (isinstance(datum, bytes) and
-            len(datum) == schema['size']) or \
-           (isinstance(datum, decimal.Decimal))
+    return (
+        (isinstance(datum, bytes) and len(datum) == schema['size'])
+        or isinstance(datum, decimal.Decimal)
+    )
 
 
 cdef inline bint validate_enum(datum, dict schema,
@@ -78,7 +83,7 @@ cdef inline bint validate_enum(datum, dict schema,
 
 cdef inline bint validate_array(datum, dict schema,
                                 str parent_ns='', bint raise_errors=True) except -1:
-    if not isinstance(datum, Iterable) or is_str(datum):
+    if not isinstance(datum, Sequence) or is_str(datum):
         return False
 
     for d in datum:
@@ -112,7 +117,7 @@ cdef inline bint validate_record(object datum, dict schema, str parent_ns='',
         return False
     _, namespace = schema_name(schema, parent_ns)
     for f in schema['fields']:
-        if not validate(datum=datum.get(f['name'], f.get('default')),
+        if not validate(datum=datum.get(f['name'], f.get('default', no_value)),
                         schema=f['type'],
                         field='{}.{}'.format(namespace, f['name']),
                         raise_errors=raise_errors):

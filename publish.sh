@@ -15,8 +15,9 @@ else
     exit 1
 fi
 
-OSes="macosx_10_12
-manylinux1"
+OSes="win_amd64
+macosx_10_13_x86_64
+manylinux1_x86_64"
 
 PyVers="27
 34
@@ -24,34 +25,17 @@ PyVers="27
 36
 37"
 
-rm -rf dist/
-
 for os in $OSes; do
     for pyver in $PyVers; do
-        wget -q --directory-prefix=dist/ https://github.com/fastavro/fastavro/releases/download/${ver}/fastavro-${ver}-cp${pyver}-cp${pyver}m-${os}_x86_64.whl
+        wget -q --directory-prefix=dist/ https://github.com/fastavro/fastavro/releases/download/${ver}/fastavro-${ver}-cp${pyver}-cp${pyver}m-${os}.whl
     done
 done
 
+# Also get the linux 2.7mu version
+wget -q --directory-prefix=dist/ https://github.com/fastavro/fastavro/releases/download/${ver}/fastavro-${ver}-cp27-cp27mu-manylinux1_x86_64.whl
+
 make fresh
 FASTAVRO_USE_CYTHON=1 python setup.py sdist
-
-windows_wheels_url="https://ci.appveyor.com/project/scottbelden/fastavro"
-if [ ! -f dist/fastavro-${ver}-cp27-cp27m-win_amd64.whl ]; then
-    echo "Make sure to download the Python 2.7 wheel from $windows_wheels_url"
-    exit 1
-fi
-if [ ! -f dist/fastavro-${ver}-cp35-cp35m-win_amd64.whl ]; then
-    echo "Make sure to download the Python 3.5 wheel from $windows_wheels_url"
-    exit 1
-fi
-if [ ! -f dist/fastavro-${ver}-cp36-cp36m-win_amd64.whl ]; then
-    echo "Make sure to download the Python 3.6 wheel from $windows_wheels_url"
-    exit 1
-fi
-if [ ! -f dist/fastavro-${ver}-cp37-cp37m-win_amd64.whl ]; then
-    echo "Make sure to download the Python 3.7 wheel from $windows_wheels_url"
-    exit 1
-fi
 
 twine upload dist/fastavro-${ver}.tar.gz
 twine upload dist/fastavro-${ver}*.whl

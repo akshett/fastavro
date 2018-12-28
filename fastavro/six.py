@@ -15,6 +15,7 @@ _encoding = 'UTF-8'
 if sys.version_info >= (3, 0):
     from io import BytesIO as MemoryIO
     xrange = range
+
     def py3_btou(n, encoding=_encoding):
         return n.decode(encoding)
 
@@ -45,12 +46,24 @@ if sys.version_info >= (3, 0):
     def py3_fstint(datum):
         return datum[0]
 
+    def py3_appendable(file_like):
+        if file_like.seekable() and file_like.tell() != 0:
+            if file_like.readable():
+                return True
+            else:
+                raise ValueError(
+                    "When appending to an avro file you must use the "
+                    + "'a+' mode, not just 'a'"
+                )
+        else:
+            return False
+
 else:  # Python 2x
-    from cStringIO import StringIO as MemoryIO  # flake8: noqa
+    from cStringIO import StringIO as MemoryIO  # noqa
     xrange = xrange
 
     def py2_btou(n, encoding=_encoding):
-        return unicode(n, encoding) # flake8: noqa
+        return unicode(n, encoding)  # noqa
 
     def py2_utob(n, encoding=_encoding):
         return n.encode(encoding)
@@ -73,16 +86,49 @@ else:  # Python 2x
         return obj.iteritems()
 
     def py2_is_str(obj):
-        return isinstance(obj, basestring) # flake8: noqa
+        return isinstance(obj, basestring)  # noqa
 
     def py2_mk_bits(bits):
         return chr(bits & 0xff)
 
     def py2_str2ints(datum):
-        return map(lambda x:ord(x), datum)
+        return map(lambda x: ord(x), datum)
 
     def py2_fstint(datum):
         return unpack('!b', datum[0])[0]
+
+    def _readable(file_like):
+        try:
+            file_like.read()
+        except Exception:
+            return False
+        return True
+
+    def py2_appendable(file_like):
+        # On Python 2 things are a mess. We basically just rely on looking at
+        # the mode. If that doesn't exist (like in the case of an io.BytesIO)
+        # then we check the position and readablility.
+        try:
+            file_like.mode
+        except AttributeError:
+            # This is probably some io stream so we rely on its tell() working
+            try:
+                if file_like.tell() != 0 and _readable(file_like):
+                    return True
+            except (OSError, IOError):
+                pass
+            return False
+
+        if "a" in file_like.mode:
+            if "+" in file_like.mode:
+                return True
+            else:
+                raise ValueError(
+                    "When appending to an avro file you must use the "
+                    + "'a+' mode, not just 'a'"
+                )
+        else:
+            return False
 
 # We do it this way and not just redifine function since Cython do not like it
 if sys.version_info >= (3, 0):
@@ -97,6 +143,7 @@ if sys.version_info >= (3, 0):
     mk_bits = py3_mk_bits
     str2ints = py3_bytes2ints
     fstint = py3_fstint
+    appendable = py3_appendable
 else:
     btou = py2_btou
     utob = py2_utob
@@ -109,3 +156,4 @@ else:
     mk_bits = py2_mk_bits
     str2ints = py2_str2ints
     fstint = py2_fstint
+    appendable = py2_appendable

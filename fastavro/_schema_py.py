@@ -38,8 +38,8 @@ def schema_name(schema, parent_ns):
         name = schema['name']
     except KeyError:
         msg = (
-            '"name" is a required field missing from ' +
-            'the schema: {}'.format(schema)
+            '"name" is a required field missing from '
+            + 'the schema: {}'.format(schema)
         )
         raise SchemaParseException(msg)
 
@@ -50,7 +50,7 @@ def schema_name(schema, parent_ns):
     return namespace, '{}.{}'.format(namespace, name)
 
 
-def parse_schema(schema, _write_hint=True):
+def parse_schema(schema, _write_hint=True, _force=False):
     """Returns a parsed avro schema
 
     It is not necessary to call parse_schema but doing so and saving the parsed
@@ -64,6 +64,9 @@ def parse_schema(schema, _write_hint=True):
     _write_hint: bool
         Internal API argument specifying whether or not the __fastavro_parsed
         marker should be added to the schema
+    _write_hint: bool
+        Internal API argument. If True, the schema will always be parsed even
+        if it has been parsed and has the __fastavro_parsed marker
 
 
     Example::
@@ -75,7 +78,9 @@ def parse_schema(schema, _write_hint=True):
         with open('weather.avro', 'wb') as out:
             writer(out, parsed_schema, records)
     """
-    if isinstance(schema, dict) and "__fastavro_parsed" in schema:
+    if _force:
+        return _parse_schema(schema, "", _write_hint)
+    elif isinstance(schema, dict) and "__fastavro_parsed" in schema:
         return schema
     else:
         return _parse_schema(schema, "", _write_hint)
@@ -110,6 +115,22 @@ def _parse_schema(schema, namespace, _write_hint):
         }
         parsed_schema["type"] = schema_type
 
+        # Correctness checks for logical types
+        logical_type = parsed_schema.get("logicalType")
+        if logical_type == "decimal":
+            scale = parsed_schema.get("scale")
+            if scale and not isinstance(scale, int):
+                raise SchemaParseException(
+                    "decimal scale must be a postive integer, "
+                    + "not {}".format(scale)
+                )
+            precision = parsed_schema.get("precision")
+            if precision and not isinstance(precision, int):
+                raise SchemaParseException(
+                    "decimal precision must be a postive integer, "
+                    + "not {}".format(precision)
+                )
+
         if schema_type == "array":
             parsed_schema["items"] = _parse_schema(
                 schema["items"],
@@ -126,14 +147,14 @@ def _parse_schema(schema, namespace, _write_hint):
 
         elif schema_type == "enum":
             _, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             parsed_schema["name"] = fullname
             parsed_schema["symbols"] = schema["symbols"]
 
         elif schema_type == "fixed":
             _, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             parsed_schema["name"] = fullname
             parsed_schema["size"] = schema["size"]
@@ -141,7 +162,7 @@ def _parse_schema(schema, namespace, _write_hint):
         elif schema_type == "record" or schema_type == "error":
             # records
             namespace, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             fields = []
             for field in schema.get('fields', []):

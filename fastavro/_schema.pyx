@@ -1,3 +1,4 @@
+# cython: language_level=3str
 # cython: auto_cpdef=True
 
 from os import path
@@ -37,8 +38,8 @@ cpdef schema_name(schema, parent_ns):
         name = schema['name']
     except KeyError:
         msg = (
-            '"name" is a required field missing from ' +
-            'the schema: {}'.format(schema)
+            '"name" is a required field missing from '
+            + 'the schema: {}'.format(schema)
         )
         raise SchemaParseException(msg)
 
@@ -85,6 +86,22 @@ cdef _parse_schema(schema, namespace, _write_hint):
         }
         parsed_schema["type"] = schema_type
 
+        # Correctness checks for logical types
+        logical_type = parsed_schema.get("logicalType")
+        if logical_type == "decimal":
+            scale = parsed_schema.get("scale")
+            if scale and not isinstance(scale, int):
+                raise SchemaParseException(
+                    "decimal scale must be a postive integer, "
+                    + "not {}".format(scale)
+                )
+            precision = parsed_schema.get("precision")
+            if precision and not isinstance(precision, int):
+                raise SchemaParseException(
+                    "decimal precision must be a postive integer, "
+                    + "not {}".format(precision)
+                )
+
         if schema_type == "array":
             parsed_schema["items"] = _parse_schema(
                 schema["items"],
@@ -101,14 +118,14 @@ cdef _parse_schema(schema, namespace, _write_hint):
 
         elif schema_type == "enum":
             _, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             parsed_schema["name"] = fullname
             parsed_schema["symbols"] = schema["symbols"]
 
         elif schema_type == "fixed":
             _, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             parsed_schema["name"] = fullname
             parsed_schema["size"] = schema["size"]
@@ -116,7 +133,7 @@ cdef _parse_schema(schema, namespace, _write_hint):
         elif schema_type == "record" or schema_type == "error":
             # records
             namespace, fullname = schema_name(schema, namespace)
-            SCHEMA_DEFS[fullname] = schema
+            SCHEMA_DEFS[fullname] = parsed_schema
 
             fields = []
             for field in schema.get('fields', []):

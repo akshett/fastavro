@@ -22,8 +22,8 @@ from .const import (
     MCS_PER_HOUR, MCS_PER_MINUTE, MCS_PER_SECOND, MLS_PER_HOUR, MLS_PER_MINUTE,
     MLS_PER_SECOND, DAYS_SHIFT
 )
-from .six import utob, MemoryIO, long, iteritems, mk_bits
-from .read import HEADER_SCHEMA, SYNC_SIZE, MAGIC
+from .six import utob, MemoryIO, long, iteritems, mk_bits, appendable
+from .read import HEADER_SCHEMA, SYNC_SIZE, MAGIC, reader
 from .schema import extract_record_type, extract_logical_type, parse_schema
 from ._schema_common import SCHEMA_DEFS
 from ._timezone import epoch
@@ -89,8 +89,8 @@ def prepare_time_millis(data, schema):
     """Convert datetime.time to int timestamp with milliseconds"""
     if isinstance(data, datetime.time):
         return int(
-            data.hour * MLS_PER_HOUR + data.minute * MLS_PER_MINUTE +
-            data.second * MLS_PER_SECOND + int(data.microsecond / 1000))
+            data.hour * MLS_PER_HOUR + data.minute * MLS_PER_MINUTE
+            + data.second * MLS_PER_SECOND + int(data.microsecond / 1000))
     else:
         return data
 
@@ -98,8 +98,8 @@ def prepare_time_millis(data, schema):
 def prepare_time_micros(data, schema):
     """Convert datetime.time to int timestamp with microseconds"""
     if isinstance(data, datetime.time):
-        return long(data.hour * MCS_PER_HOUR + data.minute * MCS_PER_MINUTE +
-                    data.second * MCS_PER_SECOND + data.microsecond)
+        return long(data.hour * MCS_PER_HOUR + data.minute * MCS_PER_MINUTE
+                    + data.second * MCS_PER_SECOND + data.microsecond)
     else:
         return data
 
@@ -108,7 +108,7 @@ def prepare_bytes_decimal(data, schema):
     """Convert decimal.Decimal to bytes"""
     if not isinstance(data, decimal.Decimal):
         return data
-    scale = schema['scale']
+    scale = schema.get('scale', 0)
 
     # based on https://github.com/apache/avro/pull/82/
 
@@ -149,7 +149,7 @@ def prepare_fixed_decimal(data, schema):
     """Converts decimal.Decimal to fixed length bytes array"""
     if not isinstance(data, decimal.Decimal):
         return data
-    scale = schema['scale']
+    scale = schema.get('scale', 0)
     size = schema['size']
 
     # based on https://github.com/apache/avro/pull/82/
@@ -468,24 +468,47 @@ class Writer(object):
                  codec='null',
                  sync_interval=1000 * SYNC_SIZE,
                  metadata=None,
-                 validator=None):
+                 validator=None,
+                 sync_marker=None):
         self.fo = fo
         self.schema = parse_schema(schema)
         self.validate_fn = validate if validator is True else validator
-        self.sync_marker = urandom(SYNC_SIZE)
         self.io = MemoryIO()
         self.block_count = 0
-        self.metadata = metadata or {}
-        self.metadata['avro.codec'] = codec
-        self.metadata['avro.schema'] = json.dumps(schema)
         self.sync_interval = sync_interval
 
-        try:
-            self.block_writer = BLOCK_WRITERS[codec]
-        except KeyError:
-            raise ValueError('unrecognized codec: %r' % codec)
+        if appendable(self.fo):
+            # Seed to the beginning to read the header
+            self.fo.seek(0)
+            avro_reader = reader(self.fo)
+            header = avro_reader._header
 
-        write_header(self.fo, self.metadata, self.sync_marker)
+            file_writer_schema = parse_schema(avro_reader.writer_schema)
+            if self.schema != file_writer_schema:
+                msg = "Provided schema {} does not match file writer_schema {}"
+                raise ValueError(msg.format(self.schema, file_writer_schema))
+
+            codec = avro_reader.metadata.get("avro.codec", "null")
+
+            self.sync_marker = header["sync"]
+
+            # Seek to the end of the file
+            self.fo.seek(0, 2)
+
+            self.block_writer = BLOCK_WRITERS[codec]
+        else:
+            self.sync_marker = sync_marker or urandom(SYNC_SIZE)
+
+            self.metadata = metadata or {}
+            self.metadata['avro.codec'] = codec
+            self.metadata['avro.schema'] = json.dumps(schema)
+
+            try:
+                self.block_writer = BLOCK_WRITERS[codec]
+            except KeyError:
+                raise ValueError('unrecognized codec: %r' % codec)
+
+            write_header(self.fo, self.metadata, self.sync_marker)
 
     def dump(self):
         write_long(self.fo, self.block_count)
@@ -515,7 +538,8 @@ def writer(fo,
            codec='null',
            sync_interval=1000 * SYNC_SIZE,
            metadata=None,
-           validator=None):
+           validator=None,
+           sync_marker=None):
     """Write records to fo (stream) according to schema
 
     Parameters
@@ -536,6 +560,9 @@ def writer(fo,
         then fastavro.validation.validate will be used. If it's a function, it
         should have the same signature as fastavro.writer.validate and raise an
         exeption on error.
+    sync_marker: bytes, optional
+        A byte string used as the avro sync marker. If not provided, a random
+        byte string will be used.
 
 
     Example::
@@ -564,6 +591,19 @@ def writer(fo,
 
         with open('weather.avro', 'wb') as out:
             writer(out, parsed_schema, records)
+
+    Given an existing avro file, it's possible to append to it by re-opening
+    the file in `a+b` mode. If the file is only opened in `ab` mode, we aren't
+    able to read some of the existing header information and an error will be
+    raised. For example::
+
+        # Write initial records
+        with open('weather.avro', 'wb') as out:
+            writer(out, parsed_schema, records)
+
+        # Write some more records
+        with open('weather.avro', 'a+b') as out:
+            writer(out, parsed_schema, more_records)
     """
     # Sanity check that records is not a single dictionary (as that is a common
     # mistake and the exception that gets raised is not helpful)
@@ -577,6 +617,7 @@ def writer(fo,
         sync_interval,
         metadata,
         validator,
+        sync_marker,
     )
 
     for record in records:

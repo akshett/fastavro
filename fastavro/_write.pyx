@@ -1,3 +1,5 @@
+# cython: language_level=3str
+
 """Python code for writing AVRO files"""
 
 # This code is a modified version of the code at
@@ -17,8 +19,8 @@ from zlib import compress
 
 from fastavro import const
 from ._validation import validate
-from ._six import utob, long, iteritems, mk_bits
-from ._read import HEADER_SCHEMA, SYNC_SIZE, MAGIC
+from ._six import utob, long, iteritems, mk_bits, appendable
+from ._read import HEADER_SCHEMA, SYNC_SIZE, MAGIC, reader
 from ._schema import extract_record_type, extract_logical_type, parse_schema
 from ._schema_common import SCHEMA_DEFS
 from ._timezone import epoch
@@ -77,7 +79,7 @@ cpdef long64 prepare_timestamp_millis(object data, schema):
             time_tuple.tm_isdst = PyInt_AS_LONG(<object>(PyTuple_GET_ITEM(tt, 8)))
 
             return mktime(& time_tuple) * MLS_PER_SECOND + <long64>(
-                data.microsecond) / 1000
+                int(data.microsecond) / 1000)
         else:
             return <long64>(<double>(data.timestamp()) * MLS_PER_SECOND)
     else:
@@ -127,16 +129,16 @@ cpdef prepare_uuid(object data, schema):
 cpdef prepare_time_millis(object data, schema):
     if isinstance(data, datetime.time):
         return int(
-            data.hour * MLS_PER_HOUR + data.minute * MLS_PER_MINUTE +
-            data.second * MLS_PER_SECOND + int(data.microsecond / 1000))
+            data.hour * MLS_PER_HOUR + data.minute * MLS_PER_MINUTE
+            + data.second * MLS_PER_SECOND + int(data.microsecond / 1000))
     else:
         return data
 
 
 cpdef prepare_time_micros(object data, schema):
     if isinstance(data, datetime.time):
-        return long(data.hour * MCS_PER_HOUR + data.minute * MCS_PER_MINUTE +
-                    data.second * MCS_PER_SECOND + data.microsecond)
+        return long(data.hour * MCS_PER_HOUR + data.minute * MCS_PER_MINUTE
+                    + data.second * MCS_PER_SECOND + data.microsecond)
     else:
         return data
 
@@ -145,7 +147,7 @@ cpdef prepare_bytes_decimal(object data, schema):
     cdef bytearray tmp
     if not isinstance(data, decimal.Decimal):
         return data
-    scale = schema['scale']
+    scale = schema.get('scale', 0)
 
     # based on https://github.com/apache/avro/pull/82/
 
@@ -186,7 +188,7 @@ cpdef prepare_fixed_decimal(object data, schema):
     cdef bytearray tmp
     if not isinstance(data, decimal.Decimal):
         return data
-    scale = schema['scale']
+    scale = schema.get('scale', 0)
     size = schema['size']
 
     # based on https://github.com/apache/avro/pull/82/
@@ -627,26 +629,50 @@ cdef class Writer(object):
                  codec='null',
                  sync_interval=1000 * SYNC_SIZE,
                  metadata=None,
-                 validator=None):
+                 validator=None,
+                 sync_marker=None):
         cdef bytearray tmp = bytearray()
+
         self.fo = fo
         self.schema = parse_schema(schema)
         self.validate_fn = validate if validator is True else validator
-        self.sync_marker = bytes(urandom(SYNC_SIZE))
         self.io = MemoryIO()
         self.block_count = 0
-        self.metadata = metadata or {}
-        self.metadata['avro.codec'] = codec
-        self.metadata['avro.schema'] = json.dumps(schema)
         self.sync_interval = sync_interval
 
-        try:
-            self.block_writer = BLOCK_WRITERS[codec]
-        except KeyError:
-            raise ValueError('unrecognized codec: %r' % codec)
+        if appendable(self.fo):
+            # Seed to the beginning to read the header
+            self.fo.seek(0)
+            avro_reader = reader(self.fo)
+            header = avro_reader._header
 
-        write_header(tmp, self.metadata, self.sync_marker)
-        self.fo.write(tmp)
+            file_writer_schema = parse_schema(avro_reader.writer_schema)
+            if self.schema != file_writer_schema:
+                msg = "Provided schema {} does not match file writer_schema {}"
+                raise ValueError(msg.format(self.schema, file_writer_schema))
+
+            codec = avro_reader.metadata.get("avro.codec", "null")
+
+            self.sync_marker = header["sync"]
+
+            # Seek to the end of the file
+            self.fo.seek(0, 2)
+
+            self.block_writer = BLOCK_WRITERS[codec]
+        else:
+            self.sync_marker = sync_marker or urandom(SYNC_SIZE)
+
+            self.metadata = metadata or {}
+            self.metadata['avro.codec'] = codec
+            self.metadata['avro.schema'] = json.dumps(schema)
+
+            try:
+                self.block_writer = BLOCK_WRITERS[codec]
+            except KeyError:
+                raise ValueError('unrecognized codec: %r' % codec)
+
+            write_header(tmp, self.metadata, self.sync_marker)
+            self.fo.write(tmp)
 
     def dump(self):
         cdef bytearray tmp = bytearray()
@@ -677,7 +703,8 @@ def writer(fo,
            codec='null',
            sync_interval=1000 * SYNC_SIZE,
            metadata=None,
-           validator=None):
+           validator=None,
+           sync_marker=None):
     # Sanity check that records is not a single dictionary (as that is a common
     # mistake and the exception that gets raised is not helpful)
     if isinstance(records, dict):
@@ -690,6 +717,7 @@ def writer(fo,
         sync_interval,
         metadata,
         validator,
+        sync_marker,
     )
 
     for record in records:

@@ -47,7 +47,7 @@ def roundtrip(schema, records, pass_schema_to_reader=False):
 
 class NoSeekMemoryIO(object):
     """Shim around MemoryIO which blocks access to everything but read.
-    Used to ensure seek API isn't being depended on."""
+    Used to ensure seek and tell API isn't being depended on."""
 
     def __init__(self, *args):
         self.underlying = MemoryIO(*args)
@@ -56,7 +56,7 @@ class NoSeekMemoryIO(object):
         return self.underlying.read(n)
 
     def tell(self):
-        return self.underlying.tell()
+        raise AssertionError("fastavro reader should not depend on tell")
 
     def seek(self, *args):
         raise AssertionError("fastavro reader should not depend on seek")
@@ -73,7 +73,7 @@ def _test_files():
 def test_file(filename):
     with open(filename, 'rb') as fo:
         reader = fastavro.reader(fo)
-        assert hasattr(reader, 'schema'), 'no schema on file'
+        assert hasattr(reader, 'writer_schema'), 'no schema on file'
 
         if basename(filename) in NO_DATA:
             return
@@ -82,13 +82,13 @@ def test_file(filename):
         assert len(records) > 0, 'no records found'
 
     new_file = MemoryIO()
-    fastavro.writer(new_file, reader.schema, records, reader.codec)
+    fastavro.writer(new_file, reader.writer_schema, records, reader.codec)
     new_file_bytes = new_file.getvalue()
 
     new_file = NoSeekMemoryIO(new_file_bytes)
     new_reader = fastavro.reader(new_file)
-    assert hasattr(new_reader, 'schema'), "schema wasn't written"
-    assert new_reader.schema == reader.schema
+    assert hasattr(new_reader, 'writer_schema'), "schema wasn't written"
+    assert new_reader.writer_schema == reader.writer_schema
     assert new_reader.codec == reader.codec
     new_records = list(new_reader)
 
@@ -693,28 +693,6 @@ def test_schema_migration_maps_failure():
 
     new_file = MemoryIO()
     records = [{"test": {"foo": "a"}}]
-    fastavro.writer(new_file, schema, records)
-    new_file.seek(0)
-    new_reader = fastavro.reader(new_file, new_schema)
-    with pytest.raises(fastavro.read.SchemaResolutionError):
-        list(new_reader)
-
-
-def test_schema_migration_enum_failure():
-    schema = {
-        "type": "enum",
-        "name": "test",
-        "symbols": ["FOO", "BAR"],
-    }
-
-    new_schema = {
-        "type": "enum",
-        "name": "test",
-        "symbols": ["BAZ", "BAR"],
-    }
-
-    new_file = MemoryIO()
-    records = ["FOO"]
     fastavro.writer(new_file, schema, records)
     new_file.seek(0)
     new_reader = fastavro.reader(new_file, new_schema)
@@ -1521,3 +1499,270 @@ def test_helpful_error_when_a_single_record_is_passed_to_writer():
         fastavro.writer(new_file, schema, record)
 
     assert "argument should be an iterable, not dict" in str(exc)
+
+
+def test_embedded_records_get_namespaced_correctly():
+    schema = {
+        'namespace': 'test',
+        'name': 'OuterName',
+        'type': 'record',
+        'fields': [{
+            'name': 'data',
+            'type': [{
+                'type': 'record',
+                'name': 'UUID',
+                'fields': [{
+                    'name': 'uuid',
+                    'type': 'string'
+                }]
+            }, {
+                'type': 'record',
+                'name': 'Abstract',
+                'fields': [{
+                    'name': 'uuid',
+                    'type': 'UUID',
+                }],
+            }, {
+                'type': 'record',
+                'name': 'Concrete',
+                'fields': [{
+                    'name': 'abstract',
+                    'type': 'Abstract'
+                }, {
+                    'name': 'custom',
+                    'type': 'string',
+                }],
+            }]
+        }]
+    }
+
+    records = [{
+        'data': {
+            'abstract': {
+                'uuid': {'uuid': 'some_uuid'}
+            },
+            'custom': 'some_string'
+        }
+    }]
+
+    assert records == roundtrip(schema, records)
+
+
+def test_null_defaults_are_not_used():
+    """https://github.com/fastavro/fastavro/issues/272"""
+    schema = [{
+        "type": "record",
+        "name": "A",
+        "fields": [{"name": "foo", "type": ["string", "null"]}]
+    }, {
+        "type": "record",
+        "name": "B",
+        "fields": [{"name": "bar", "type": ["string", "null"]}]
+    }, {
+        "type": "record",
+        "name": "AOrB",
+        "fields": [{"name": "entity", "type": ["A", "B"]}]
+    }]
+
+    datum_to_read = {'entity': {'foo': 'this is an instance of schema A'}}
+
+    assert [datum_to_read] == roundtrip(schema, [datum_to_read])
+
+
+def test_union_schema_ignores_extra_fields():
+    """https://github.com/fastavro/fastavro/issues/274"""
+    schema = [{
+        "type": "record",
+        "name": "A",
+        "fields": [{"name": "name", "type": "string"}]
+    }, {
+        "type": "record",
+        "name": "B",
+        "fields": [{"name": "other_name", "type": "string"}]
+    }]
+
+    records = [{"name": "abc", "other": "asd"}]
+
+    assert [{"name": "abc"}] == roundtrip(schema, records)
+
+
+def test_appending_records(tmpdir):
+    """https://github.com/fastavro/fastavro/issues/276"""
+    schema = {
+        "type": "record",
+        "name": "test_appending_records",
+        "fields": [{
+            "name": "field",
+            "type": "string",
+        }]
+    }
+
+    test_file = str(tmpdir.join("test.avro"))
+
+    with open(test_file, "wb") as new_file:
+        fastavro.writer(new_file, schema, [{"field": "foo"}])
+
+    with open(test_file, "a+b") as new_file:
+        fastavro.writer(new_file, schema, [{"field": "bar"}])
+
+    with open(test_file, "rb") as new_file:
+        reader = fastavro.reader(new_file)
+        new_records = list(reader)
+
+    assert new_records == [{"field": "foo"}, {"field": "bar"}]
+
+
+def test_appending_records_with_io_stream():
+    """https://github.com/fastavro/fastavro/issues/276"""
+    schema = {
+        "type": "record",
+        "name": "test_appending_records_with_io_stream",
+        "fields": [{
+            "name": "field",
+            "type": "string",
+        }]
+    }
+
+    stream = MemoryIO()
+
+    fastavro.writer(stream, schema, [{"field": "foo"}])
+
+    # Should be able to append to the existing stream
+    fastavro.writer(stream, schema, [{"field": "bar"}])
+
+    stream.seek(0)
+    reader = fastavro.reader(stream)
+    new_records = list(reader)
+
+    assert new_records == [{"field": "foo"}, {"field": "bar"}]
+
+    # If we seek to the beginning and write, it will be treated like a brand
+    # new file
+    stream.seek(0)
+    fastavro.writer(stream, schema, [{"field": "abcdefghijklmnopqrstuvwxyz"}])
+
+    stream.seek(0)
+    reader = fastavro.reader(stream)
+    new_records = list(reader)
+
+    assert new_records == [{"field": "abcdefghijklmnopqrstuvwxyz"}]
+
+
+def test_appending_records_wrong_mode_fails(tmpdir):
+    """https://github.com/fastavro/fastavro/issues/276"""
+    schema = {
+        "type": "record",
+        "name": "test_appending_records_wrong_mode_fails",
+        "fields": [{
+            "name": "field",
+            "type": "string",
+        }]
+    }
+
+    test_file = str(tmpdir.join("test.avro"))
+
+    with open(test_file, "wb") as new_file:
+        fastavro.writer(new_file, schema, [{"field": "foo"}])
+
+    with open(test_file, "ab") as new_file:
+        with pytest.raises(ValueError) as exc:
+            fastavro.writer(new_file, schema, [{"field": "bar"}])
+
+        assert "you must use the 'a+' mode, not just 'a'" in str(exc)
+
+
+def test_appending_records_different_schema_fails(tmpdir):
+    """https://github.com/fastavro/fastavro/issues/276"""
+    schema = {
+        "type": "record",
+        "name": "test_appending_records_different_schema_fails",
+        "fields": [{
+            "name": "field",
+            "type": "string",
+        }]
+    }
+
+    test_file = str(tmpdir.join("test.avro"))
+
+    with open(test_file, "wb") as new_file:
+        fastavro.writer(new_file, schema, [{"field": "foo"}])
+
+    different_schema = {
+        "type": "record",
+        "name": "test_appending_records",
+        "fields": [{
+            "name": "field",
+            "type": "int",
+        }]
+    }
+
+    with open(test_file, "a+b") as new_file:
+        with pytest.raises(ValueError) as exc:
+            fastavro.writer(new_file, different_schema, [{"field": 1}])
+
+        assert "does not match file writer_schema" in str(exc)
+
+
+def test_user_specified_sync():
+    """https://github.com/fastavro/fastavro/issues/300"""
+    schema = {
+        "type": "record",
+        "name": "test_user_specified_sync",
+        "fields": []
+    }
+
+    file1 = MemoryIO()
+    file2 = MemoryIO()
+
+    records = [{}]
+
+    fastavro.writer(file1, schema, records, sync_marker=b'sync')
+    fastavro.writer(file2, schema, records, sync_marker=b'sync')
+
+    assert file1.getvalue() == file2.getvalue()
+
+
+def test_order_of_values_in_map():
+    """https://github.com/fastavro/fastavro/issues/303"""
+    schema = {
+        'doc': 'A weather reading.',
+        'name': 'Weather',
+        'namespace': 'test',
+        'type': 'record',
+        'fields': [{
+            'name': 'metadata',
+            'type': {
+                'type': 'map',
+                'values': [{
+                    'type': 'array',
+                    'items': 'string'
+                }, {
+                    'type': 'map',
+                    'values': ['string']
+                }]
+            }
+        }],
+    }
+    parsed_schema = fastavro.parse_schema(schema)
+
+    records = [{'metadata': {'map1': {'map2': 'str'}}}]
+
+    assert records == roundtrip(parsed_schema, records)
+
+
+def test_reader_schema_attributes_throws_deprecation():
+    """https://github.com/fastavro/fastavro/issues/246"""
+    schema = {
+        "type": "record",
+        "name": "test_reader_schema_attributes_throws_deprecation",
+        "fields": []
+    }
+
+    stream = MemoryIO()
+
+    fastavro.writer(stream, schema, [{}])
+    stream.seek(0)
+
+    reader = fastavro.reader(stream)
+    with pytest.warns(DeprecationWarning):
+        reader.schema

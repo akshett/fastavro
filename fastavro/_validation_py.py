@@ -1,7 +1,7 @@
 import datetime
 import decimal
 import numbers
-from collections import Iterable, Mapping
+from collections import Mapping, Sequence
 
 from fastavro.const import (
     INT_MAX_VALUE, INT_MIN_VALUE, LONG_MAX_VALUE, LONG_MIN_VALUE
@@ -10,6 +10,8 @@ from ._validate_common import ValidationError, ValidationErrorData
 from .schema import extract_record_type, UnknownType, schema_name
 from .six import long, is_str, iterkeys, itervalues
 from ._schema_common import SCHEMA_DEFS
+
+no_value = object()
 
 
 def validate_null(datum, **kwargs):
@@ -89,10 +91,11 @@ def validate_int(datum, **kwargs):
         Unused kwargs
     """
     return (
-            (isinstance(datum, (int, long, numbers.Integral)) and
-             INT_MIN_VALUE <= datum <= INT_MAX_VALUE) or
-            isinstance(datum, (datetime.time, datetime.datetime,
-                               datetime.date))
+            (isinstance(datum, (int, long, numbers.Integral))
+             and INT_MIN_VALUE <= datum <= INT_MAX_VALUE)
+            or isinstance(
+                datum, (datetime.time, datetime.datetime, datetime.date)
+            )
     )
 
 
@@ -116,10 +119,11 @@ def validate_long(datum, **kwargs):
         Unused kwargs
     """
     return (
-            (isinstance(datum, (int, long, numbers.Integral)) and
-             LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE) or
-            isinstance(datum, (datetime.time, datetime.datetime,
-                               datetime.date))
+            (isinstance(datum, (int, long, numbers.Integral))
+             and LONG_MIN_VALUE <= datum <= LONG_MAX_VALUE)
+            or isinstance(
+                datum, (datetime.time, datetime.datetime, datetime.date)
+            )
     )
 
 
@@ -195,7 +199,7 @@ def validate_array(datum, schema, parent_ns=None, raise_errors=True):
         If true, raises ValidationError on invalid data
     """
     return (
-            isinstance(datum, Iterable) and
+            isinstance(datum, Sequence) and
             not is_str(datum) and
             all(validate(datum=d, schema=schema['items'],
                          field=parent_ns,
@@ -247,7 +251,7 @@ def validate_record(datum, schema, parent_ns=None, raise_errors=True):
     _, namespace = schema_name(schema, parent_ns)
     return (
         isinstance(datum, Mapping) and
-        all(validate(datum=datum.get(f['name'], f.get('default')),
+        all(validate(datum=datum.get(f['name'], f.get('default', no_value)),
                      schema=f['type'],
                      field='{}.{}'.format(namespace, f['name']),
                      raise_errors=raise_errors)

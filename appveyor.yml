@@ -5,14 +5,13 @@ branches:
 environment:
     matrix:
         - PYTHON: "C:\\Python27-x64"
-        # Can't build on 3.4 due to https://github.com/appveyor/ci/issues/1699
-        # and/or https://github.com/appveyor/ci/issues/968
-        # - PYTHON: "C:\\Python34-x64"
+        - PYTHON: "C:\\Python34-x64"
         - PYTHON: "C:\\Python35-x64"
         - PYTHON: "C:\\Python36-x64"
         - PYTHON: "C:\\Python37-x64"
 
 install:
+    - "%PYTHON%\\python.exe -m pip install --upgrade setuptools"
     - "%PYTHON%\\python.exe -m pip install -r developer_requirements.txt"
 
 build: off
@@ -32,3 +31,13 @@ after_test:
 artifacts:
     # Archive the generated packages in the ci.appveyor.com build report.
     - path: dist\*
+      name: fastavro_wheel
+
+deploy:
+    provider: GitHub
+    auth_token:
+        secure: 96GKkPSZRbCGtB8EPBm1P3/lPK5rQE8zVWPJfSyjbcIKaxbv0+YPaXo/Q6LyMa4f
+    artifact: fastavro_wheel
+    on:
+        branch: master
+        appveyor_repo_tag: true

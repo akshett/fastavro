@@ -1,3 +1,4 @@
+# cython: language_level=3str
 # cython: auto_cpdef=True
 
 """Python code for reading AVRO files"""
@@ -15,7 +16,7 @@ from uuid import UUID
 import json
 
 from ._six import (
-    btou, iteritems, is_str, str2ints, fstint
+    btou, utob, iteritems, is_str, str2ints, fstint, long
 )
 from ._schema import extract_record_type, extract_logical_type, parse_schema
 from ._schema_common import SCHEMA_DEFS
@@ -73,6 +74,10 @@ cpdef match_types(writer_type, reader_type):
     elif writer_type == 'long' and reader_type in ['float', 'double']:
         return True
     elif writer_type == 'float' and reader_type == 'double':
+        return True
+    elif writer_type == 'string' and reader_type == 'bytes':
+        return True
+    elif writer_type == 'bytes' and reader_type == 'string':
         return True
     return False
 
@@ -184,7 +189,7 @@ cpdef _read_decimal(data, size, writer_schema):
     based on https://github.com/apache/avro/pull/82/
     """
     cdef int32 offset
-    scale = writer_schema['scale']
+    scale = writer_schema.get('scale', 0)
     precision = writer_schema['precision']
 
     datum_byte = str2ints(data)
@@ -254,10 +259,10 @@ cdef read_float(fo, writer_schema=None, reader_schema=None):
     data = fo.read(4)
     if len(data) == 4:
         ch_data[:4] = data
-        fi.n = (ch_data[0] |
-                (ch_data[1] << 8) |
-                (ch_data[2] << 16) |
-                (ch_data[3] << 24))
+        fi.n = (ch_data[0]
+                | (ch_data[1] << 8)
+                | (ch_data[2] << 16)
+                | (ch_data[3] << 24))
         return fi.f
     else:
         raise ReadError
@@ -280,14 +285,14 @@ cdef read_double(fo, writer_schema=None, reader_schema=None):
     data = fo.read(8)
     if len(data) == 8:
         ch_data[:8] = data
-        dl.n = (ch_data[0] |
-                (<ulong64>(ch_data[1]) << 8) |
-                (<ulong64>(ch_data[2]) << 16) |
-                (<ulong64>(ch_data[3]) << 24) |
-                (<ulong64>(ch_data[4]) << 32) |
-                (<ulong64>(ch_data[5]) << 40) |
-                (<ulong64>(ch_data[6]) << 48) |
-                (<ulong64>(ch_data[7]) << 56))
+        dl.n = (ch_data[0]
+                | (<ulong64>(ch_data[1]) << 8)
+                | (<ulong64>(ch_data[2]) << 16)
+                | (<ulong64>(ch_data[3]) << 24)
+                | (<ulong64>(ch_data[4]) << 32)
+                | (<ulong64>(ch_data[5]) << 40)
+                | (<ulong64>(ch_data[6]) << 48)
+                | (<ulong64>(ch_data[7]) << 56))
         return dl.d
     else:
         raise ReadError
@@ -319,9 +324,13 @@ cdef read_enum(fo, writer_schema, reader_schema=None):
     index = read_long(fo)
     symbol = writer_schema['symbols'][index]
     if reader_schema and symbol not in reader_schema['symbols']:
-        symlist = reader_schema['symbols']
-        msg = '%s not found in reader symbol list %s' % (symbol, symlist)
-        raise SchemaResolutionError(msg)
+        default = reader_schema.get("default")
+        if default:
+            return default
+        else:
+            symlist = reader_schema['symbols']
+            msg = '%s not found in reader symbol list %s' % (symbol, symlist)
+            raise SchemaResolutionError(msg)
     return symbol
 
 
@@ -496,6 +505,22 @@ LOGICAL_READERS = {
 }
 
 
+cpdef maybe_promote(data, writer_type, reader_type):
+    if writer_type == "int":
+        if reader_type == "long":
+            return long(data)
+        if reader_type == "float" or reader_type == "double":
+            return float(data)
+    if writer_type == "long":
+        if reader_type == "float" or reader_type == "double":
+            return float(data)
+    if writer_type == "string" and reader_type == "bytes":
+        return utob(data)
+    if writer_type == "bytes" and reader_type == "string":
+        return btou(data, 'utf-8')
+    return data
+
+
 cpdef _read_data(fo, writer_schema, reader_schema=None):
     """Read data from file object according to schema."""
 
@@ -551,7 +576,14 @@ cpdef _read_data(fo, writer_schema, reader_schema=None):
         if fn:
             return fn(data, writer_schema, reader_schema)
 
-    return data
+    if reader_schema is not None:
+        return maybe_promote(
+            data,
+            record_type,
+            extract_record_type(reader_schema)
+        )
+    else:
+        return data
 
 
 cpdef skip_sync(fo, sync_marker):
@@ -594,9 +626,23 @@ except ImportError:
 
 
 def _iter_avro_records(fo, header, codec, writer_schema, reader_schema):
-    for block in _iter_avro_blocks(fo, header, codec, writer_schema, reader_schema):
-        for record in block:
-            yield record
+    cdef int32 i
+
+    sync_marker = header['sync']
+
+    read_block = BLOCK_READERS.get(codec)
+    if not read_block:
+        raise ValueError('Unrecognized codec: %r' % codec)
+
+    block_count = 0
+    while True:
+        block_count = read_long(fo)
+        block_fo = read_block(fo)
+
+        for i in range(block_count):
+            yield _read_data(block_fo, writer_schema, reader_schema)
+
+        skip_sync(fo, sync_marker)
 
 
 def _iter_avro_blocks(fo, header, codec, writer_schema, reader_schema):
@@ -660,7 +706,7 @@ class file_reader:
             k: btou(v) for k, v in iteritems(self._header['meta'])
         }
 
-        self.schema = json.loads(self.metadata['avro.schema'])
+        self._schema = json.loads(self.metadata['avro.schema'])
         self.codec = self.metadata.get('avro.codec', 'null')
 
         if reader_schema:
@@ -668,9 +714,18 @@ class file_reader:
         else:
             self.reader_schema = None
 
-        self.writer_schema = parse_schema(self.schema, _write_hint=False)
+        self.writer_schema = parse_schema(self._schema, _write_hint=False)
 
         self._elems = None
+
+    @property
+    def schema(self):
+        import warnings
+        warnings.warn(
+            "The 'schema' attribute is deprecated. Please use 'writer_schema'",
+            DeprecationWarning,
+        )
+        return self._schema
 
     def __iter__(self):
         if not self._elems:

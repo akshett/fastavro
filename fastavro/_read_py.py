@@ -16,7 +16,7 @@ from uuid import UUID
 import json
 
 from .six import (
-    xrange, btou, iteritems, is_str, str2ints, fstint
+    xrange, btou, utob, iteritems, is_str, str2ints, fstint, long
 )
 from .schema import extract_record_type, extract_logical_type, parse_schema
 from ._schema_common import SCHEMA_DEFS
@@ -62,6 +62,10 @@ def match_types(writer_type, reader_type):
     elif writer_type == 'long' and reader_type in ['float', 'double']:
         return True
     elif writer_type == 'float' and reader_type == 'double':
+        return True
+    elif writer_type == 'string' and reader_type == 'bytes':
+        return True
+    elif writer_type == 'bytes' and reader_type == 'string':
         return True
     return False
 
@@ -167,7 +171,7 @@ def _read_decimal(data, size, writer_schema):
     """
     based on https://github.com/apache/avro/pull/82/
     """
-    scale = writer_schema['scale']
+    scale = writer_schema.get('scale', 0)
     precision = writer_schema['precision']
 
     datum_byte = str2ints(data)
@@ -259,9 +263,13 @@ def read_enum(fo, writer_schema, reader_schema=None):
     index = read_long(fo)
     symbol = writer_schema['symbols'][index]
     if reader_schema and symbol not in reader_schema['symbols']:
-        symlist = reader_schema['symbols']
-        msg = '%s not found in reader symbol list %s' % (symbol, symlist)
-        raise SchemaResolutionError(msg)
+        default = reader_schema.get("default")
+        if default:
+            return default
+        else:
+            symlist = reader_schema['symbols']
+            msg = '%s not found in reader symbol list %s' % (symbol, symlist)
+            raise SchemaResolutionError(msg)
     return symbol
 
 
@@ -450,6 +458,22 @@ READERS = {
 }
 
 
+def maybe_promote(data, writer_type, reader_type):
+    if writer_type == "int":
+        if reader_type == "long":
+            return long(data)
+        if reader_type == "float" or reader_type == "double":
+            return float(data)
+    if writer_type == "long":
+        if reader_type == "float" or reader_type == "double":
+            return float(data)
+    if writer_type == "string" and reader_type == "bytes":
+        return utob(data)
+    if writer_type == "bytes" and reader_type == "string":
+        return btou(data, 'utf-8')
+    return data
+
+
 def read_data(fo, writer_schema, reader_schema=None):
     """Read data from file object according to schema."""
 
@@ -476,7 +500,14 @@ def read_data(fo, writer_schema, reader_schema=None):
             if fn:
                 return fn(data, writer_schema, reader_schema)
 
-        return data
+        if reader_schema is not None:
+            return maybe_promote(
+                data,
+                record_type,
+                extract_record_type(reader_schema)
+            )
+        else:
+            return data
     else:
         return read_data(
             fo,
@@ -527,10 +558,25 @@ except ImportError:
 
 def _iter_avro_records(fo, header, codec, writer_schema, reader_schema):
     """Return iterator over avro records."""
-    for block in _iter_avro_blocks(fo, header, codec, writer_schema,
-                                   reader_schema):
-        for record in block:
-            yield record
+    sync_marker = header['sync']
+
+    read_block = BLOCK_READERS.get(codec)
+    if not read_block:
+        raise ValueError('Unrecognized codec: %r' % codec)
+
+    block_count = 0
+    while True:
+        try:
+            block_count = read_long(fo)
+        except StopIteration:
+            return
+
+        block_fo = read_block(fo)
+
+        for i in xrange(block_count):
+            yield read_data(block_fo, writer_schema, reader_schema)
+
+        skip_sync(fo, sync_marker)
 
 
 def _iter_avro_blocks(fo, header, codec, writer_schema, reader_schema):
@@ -561,6 +607,28 @@ def _iter_avro_blocks(fo, header, codec, writer_schema, reader_schema):
 
 
 class Block:
+    """An avro block. Will yield records when iterated over
+
+    .. attribute:: num_records
+
+        Number of records in the block
+
+    .. attribute:: writer_schema
+
+        The schema used when writing
+
+    .. attribute:: reader_schema
+
+        The schema used when reading (if provided)
+
+    .. attribute:: offset
+
+        Offset of the block from the begining of the avro file
+
+    .. attribute:: size
+
+        Size of the block in bytes
+    """
     def __init__(self, bytes_, num_records, codec, reader_schema,
                  writer_schema, offset, size):
         self.bytes_ = bytes_
@@ -595,7 +663,7 @@ class file_reader:
             k: btou(v) for k, v in iteritems(self._header['meta'])
         }
 
-        self.schema = json.loads(self.metadata['avro.schema'])
+        self._schema = json.loads(self.metadata['avro.schema'])
         self.codec = self.metadata.get('avro.codec', 'null')
 
         if reader_schema:
@@ -603,13 +671,26 @@ class file_reader:
         else:
             self.reader_schema = None
 
-        self.writer_schema = parse_schema(self.schema, _write_hint=False)
+        # Always parse the writer schema since it might have named types that
+        # need to be stored in SCHEMA_DEFS
+        self.writer_schema = parse_schema(
+            self._schema, _write_hint=False, _force=True
+        )
 
         self._elems = None
 
+    @property
+    def schema(self):
+        import warnings
+        warnings.warn(
+            "The 'schema' attribute is deprecated. Please use 'writer_schema'",
+            DeprecationWarning,
+        )
+        return self._schema
+
     def __iter__(self):
         if not self._elems:
-            raise NotImplemented
+            raise NotImplementedError
         return self._elems
 
     def next(self):
@@ -636,6 +717,22 @@ class reader(file_reader):
             avro_reader = reader(fo)
             for record in avro_reader:
                 process_record(record)
+
+    .. attribute:: metadata
+
+        Key-value pairs in the header metadata
+
+    .. attribute:: codec
+
+        The codec used when writing
+
+    .. attribute:: writer_schema
+
+        The schema used when writing
+
+    .. attribute:: reader_schema
+
+        The schema used when reading (if provided)
     """
 
     def __init__(self, fo, reader_schema=None):
@@ -649,7 +746,7 @@ class reader(file_reader):
 
 
 class block_reader(file_reader):
-    """Iterator over blocks in an avro file.
+    """Iterator over :class:`.Block` in an avro file.
 
     Parameters
     ----------
@@ -666,6 +763,22 @@ class block_reader(file_reader):
             avro_reader = block_reader(fo)
             for block in avro_reader:
                 process_block(block)
+
+    .. attribute:: metadata
+
+        Key-value pairs in the header metadata
+
+    .. attribute:: codec
+
+        The codec used when writing
+
+    .. attribute:: writer_schema
+
+        The schema used when writing
+
+    .. attribute:: reader_schema
+
+        The schema used when reading (if provided)
     """
 
     def __init__(self, fo, reader_schema=None):
@@ -679,7 +792,8 @@ class block_reader(file_reader):
 
 
 def schemaless_reader(fo, writer_schema, reader_schema=None):
-    """Reads a single record writen using the schemaless_writer
+    """Reads a single record writen using the
+    :meth:`~fastavro._write_py.schemaless_writer`
 
     Parameters
     ----------

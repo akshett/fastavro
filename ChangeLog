@@ -1,3 +1,46 @@
+2018-12-21 version 0.21.16
+* Change the return type of values when promoted by the reader schema (@scottbelden in PR #307)
+
+2018-12-10 version 0.21.15
+* Deprecate schema attribute on the reader class (@scottbelden in PR #305)
+* Publish wheel for py27mu (@brianmartin in PR #306)
+
+2018-11-17 version 0.21.14
+* Ensure maps do not validate as arrays (@scottbelden in PR #304)
+
+2018-11-11 version 0.21.13
+* Add support for user specified sync_marker values (@scottbelden in PR #301)
+* Add support for specifying default values for enums (@scottbelden in PR #299)
+
+2018-10-31 version 0.21.12
+* Fix a regression to re-enable support for reading from streams (@scottbelden in PR #297)
+
+2018-10-30 version 0.21.11
+* Fix a regression to re-enable support for writing to streams (@jquast in PR #293)
+
+2018-10-24 version 0.21.10
+* Fix an issue where an avro file written out wouldn't be readable (@scottbelden in PR #289)
+
+2018-10-09 version 0.21.9
+* Fix bug where a decimal scale was not defaulting to zero (@scottbelden in PR #283)
+
+2018-09-25 version 0.21.8
+* Add support for appending to an existing avro file (@scottbelden in PR #278)
+* Build python 3.4 wheels on Windows (@scottbelden in PR #279)
+* Improve documentation for reader objects (@scottbelden in PR #277)
+
+2018-09-17 version 0.21.7
+* Change the validator back so that it will accept extra fields when validating union schema (@scottbelden in PR #275)
+
+2018-09-16 version 0.21.6
+* Fix validator picking the wrong union schema (@scottbelden in PR #273)
+* Support ValidationError class unicode on python 2 (@soluwalana in PR #269)
+
+2018-09-04 version 0.21.5
+* Fix namespace issue with embedded records (@scottbelden in PR #266)
+* Check that scale and precision are integers (@scottbelden in PR #267)
+* Add a sanity check that the input to `writer` is not a single record (@scottbelden in PR #260)
+
 2018-07-25 version 0.21.4
 * Build OSX wheels (@scottbelden in PR #255)
 
